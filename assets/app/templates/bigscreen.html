@@ -466,6 +466,11 @@
   #srList .hit .hh{display:flex;gap:10px;font-size:11.5px;font-family:var(--mono);color:var(--dim2);margin-bottom:5px}
   #srList .hit .hh .nm{color:var(--accent)}
   #srList .hit .tt{font-size:14px;color:#e3ebf8;line-height:1.55}
+  #srFoot{display:flex;align-items:center;justify-content:center;gap:12px;padding-top:14px}
+  #srFoot button{background:#18202f;border:1px solid #2a3654;color:#c5d1e4;border-radius:8px;
+    padding:7px 18px;font-size:12px;cursor:pointer;font-family:var(--mono)}
+  #srFoot button:disabled{opacity:.38;cursor:not-allowed}
+  #srPage{min-width:72px;text-align:center;color:var(--dim2);font:12px var(--mono)}
   /* 平台授权弹层 */
   #lgWrap{position:fixed;inset:0;background:rgba(4,7,12,.8);backdrop-filter:blur(6px);
     display:none;align-items:center;justify-content:center;z-index:70}
@@ -500,10 +505,8 @@
     border:1px solid var(--line);border-radius:9px;padding:6px 14px}
   #cvHead .x:hover{color:var(--text);border-color:var(--accent)}
   #cvList{flex:1;overflow:auto;padding:6px 20px 10px}
-  #cvFoot{padding:10px 20px;border-top:1px solid var(--line);display:flex;justify-content:center}
-  #cvFoot button{background:#18202f;border:1px solid #2a3654;color:#8fa0ba;border-radius:8px;
-    padding:7px 18px;font-size:12px;cursor:pointer;font-family:var(--mono)}
-  #cvFoot button:hover{color:var(--text);border-color:var(--accent)}
+  #cvFoot{padding:9px 20px;border-top:1px solid var(--line);display:flex;justify-content:center;
+    color:var(--dim2);font:12px var(--mono)}
   /* TOP 会话行可点击 */
   .conv{cursor:pointer}
   .conv:hover .nm{color:var(--accent)}
@@ -670,6 +673,11 @@
     <span class="x" onclick="closeSr()">关闭 ESC</span>
   </div>
   <div id="srList"></div>
+  <div id="srFoot">
+    <button id="srPrev" onclick="searchPage(-1)">上一页</button>
+    <span id="srPage">第 1 页</span>
+    <button id="srNext" onclick="searchPage(1)">下一页</button>
+  </div>
 </div>
 
 <!-- 平台授权弹层 -->
@@ -697,9 +705,7 @@
       <span class="x" onclick="closeConv()">关闭 ESC</span>
     </div>
     <div id="cvList"></div>
-    <div id="cvFoot">
-      <button id="cvMore" onclick="loadConvMore()">加载更多</button>
-    </div>
+    <div id="cvFoot" role="status" aria-live="polite">向下滚动加载更早消息</div>
   </div>
 </div>
 
@@ -1021,52 +1027,39 @@ async function openConv(talker, name, count){
   $('#cvTitle').textContent = dispName(name) || UNKNOWN_ROOM;
   $('#cvMeta').textContent = (count ? fmtN(count) + ' 条消息' : '');
   $('#cvList').innerHTML = '<div class="empty">加载中…</div>';
-  $('#cvMore').style.display = 'none';
+  $('#cvFoot').textContent = '加载中…';
   $('#cvWrap').classList.add('on');
   await loadConvMore();
 }
 
 async function loadConvMore(){
   if(CONV_STATE.loading || CONV_STATE.done) return;
-  CONV_STATE.loading = true;
-  const more = $('#cvMore');
-  more.textContent = '加载中…';
+  const state = CONV_STATE;
+  state.loading = true;
+  const foot = $('#cvFoot');
+  foot.textContent = '加载中…';
   const box = $('#cvList');
-  // 记录插入前的高度：更早的消息要插到**顶部**，
-  // 插完后把滚动位置补偿回去，视图才不会跳动。
-  const prevH = box.scrollHeight;
-  const prevTop = box.scrollTop;
   try{
-    // order=desc：取最新的消息；显示时再翻转成时间正序（最新在底部）
-    const d = await api('api/messages?talker=' + encodeURIComponent(CONV_STATE.talker)
-                        + '&page=' + CONV_STATE.page + '&order=desc');
+    // 最新消息在前；用户一直向下滚动，就持续追加更早的记录。
+    const d = await api('api/messages?talker=' + encodeURIComponent(state.talker)
+                        + '&page=' + state.page + '&order=desc');
+    if(state !== CONV_STATE) return;
     const msgs = (d && d.messages) || [];
-    if(d && typeof d.count === 'number') CONV_STATE.total = d.count;
-    if(CONV_STATE.page === 0) box.innerHTML = '';
-    if(!msgs.length && CONV_STATE.page === 0){
+    if(d && typeof d.count === 'number') state.total = d.count;
+    if(state.page === 0) box.innerHTML = '';
+    if(!msgs.length && state.page === 0){
       box.innerHTML = '<div class="empty">该会话没有可显示的消息</div>';
     } else {
-      // 后端按 desc（最新在前）返回，翻转成时间正序（最早在前）。
-      // page=0 是最新的一页 → 追加到**底部**；
-      // page>0 是更早的一页 → 必须插到**顶部**，
-      // 否则会出现「最新消息之后又冒出更早消息」的错序，
-      // 而且新加载的内容在视口外，用户看着像"没加载出来"。
-      const html = msgs.slice().reverse().map(m => {
+      const html = msgs.map(m => {
         const who = m.isSend ? '我'
-          : (dispName(m.sender_name) || dispName(m.name) || dispName(CONV_STATE.talker) || UNKNOWN_PERSON);
+          : (dispName(m.sender_name) || dispName(m.name) || dispName(state.talker) || UNKNOWN_PERSON);
         return `<div class="msg${m.isSend ? ' mine' : ''}">
           <div class="mh"><span class="who">${esc(who)}</span><span class="t">${fmtTime(m.time)}</span></div>
           <div class="tx">${esc(m.content)}</div></div>`;
       }).join('');
-      if(CONV_STATE.page === 0){
-        box.insertAdjacentHTML('beforeend', html);
-      }else{
-        box.insertAdjacentHTML('afterbegin', html);
-        // 顶部插入后补偿滚动位置，保持用户当前看到的消息不动
-        box.scrollTop = prevTop + (box.scrollHeight - prevH);
-      }
+      box.insertAdjacentHTML('beforeend', html);
     }
-    CONV_STATE.page++;
+    state.page++;
     // 还能继续翻就显示"加载更多"（继续往更早的方向翻）
     //
     // 关键：判断依据必须是 has_more（后端按**原始行数**算的），
@@ -1074,29 +1067,27 @@ async function loadConvMore(){
     // 一页 80 行过滤后可能只剩 56 条，用过滤后的条数会误判成最后一页，
     // 结果「加载更早的消息」按钮永远不出现，用户只能看到最近一页。
     if(d && typeof d.has_more === 'boolean'){
-      CONV_STATE.done = !d.has_more;
+      state.done = !d.has_more;
     }else{
-      CONV_STATE.done = !(msgs.length >= 80);
+      state.done = !(msgs.length >= 80);
     }
-    if(!CONV_STATE.done){
-      more.style.display = '';
-      more.textContent = '加载更早的消息';
-    } else {
-      more.style.display = 'none';
-    }
-    $('#cvMeta').textContent = fmtN(CONV_STATE.total) + ' 条消息';
-    // 首次加载后自动滚到底部（最新消息）
-    if(CONV_STATE.page === 1 && msgs.length){
-      box.scrollTop = box.scrollHeight;
-    }
+    foot.textContent = state.done ? '已加载全部消息' : '继续向下滚动加载更早消息';
+    $('#cvMeta').textContent = fmtN(state.total) + ' 条消息';
   }catch(e){
     box.insertAdjacentHTML('beforeend',
       `<div class="empty">加载失败：${esc(String(e && e.message || e))}</div>`);
-    more.style.display = 'none';
+    foot.textContent = '加载失败，请关闭后重试';
   }finally{
-    CONV_STATE.loading = false;
+    state.loading = false;
+    if(state === CONV_STATE && !state.done && box.scrollHeight <= box.clientHeight + 160){
+      setTimeout(loadConvMore, 0);
+    }
   }
 }
+
+$('#cvList').addEventListener('scroll', function(){
+  if(this.scrollTop + this.clientHeight >= this.scrollHeight - 160) loadConvMore();
+}, {passive:true});
 
 function closeConv(){
   $('#cvWrap').classList.remove('on');
@@ -1617,27 +1608,40 @@ function hl(text, q){
   }catch(e){ return t; }
 }
 
-let srQ = '';
-async function doSearch(){
+let srQ = '', srPage = 0, srHasMore = false;
+async function doSearch(page=0){
   const q = $('#q').value.trim();
   if(!q) return;
   srQ = q;
+  srPage = Math.max(0, page);
   $('#srWrap').classList.add('on');
   $('#srQ').textContent = '搜索：' + q;
   $('#srN').textContent = '检索中…';
+  $('#srPrev').disabled = true;
+  $('#srNext').disabled = true;
+  $('#srPage').textContent = '第 ' + (srPage + 1) + ' 页';
   $('#srList').innerHTML = '<div class="empty">正在全库检索，数据量大时需几秒…</div>';
   try{
-    const d = await api('api/search?q=' + encodeURIComponent(q));
+    const d = await api('api/search?q=' + encodeURIComponent(q) + '&page=' + srPage + '&page_size=50');
     const rows = d.results || [];
-    $('#srN').textContent = rows.length + ' 条命中';
+    srHasMore = !!d.has_more;
+    $('#srN').textContent = '本页 ' + rows.length + ' 条';
+    $('#srPrev').disabled = srPage === 0;
+    $('#srNext').disabled = !srHasMore;
     if(!rows.length){ $('#srList').innerHTML = '<div class="empty">没有匹配的记录</div>'; return; }
     $('#srList').innerHTML = rows.map(r => `<div class="hit">
       <div class="hh"><span class="nm">${esc(dispName(r.name) || UNKNOWN_ROOM)}</span><span>${fmtTime(r.time)}</span></div>
       <div class="tt">${hl(r.content, srQ)}</div></div>`).join('');
+    $('#srList').scrollTop = 0;
   }catch(e){
     $('#srN').textContent = '检索失败';
     $('#srList').innerHTML = '<div class="empty">' + esc(String(e)) + '</div>';
   }
+}
+function searchPage(step){
+  const next = srPage + step;
+  if(next < 0 || (step > 0 && !srHasMore)) return;
+  doSearch(next);
 }
 // 一键整理：把当前搜索关键词的结果做成 Word 文档下载
 async function doDigest(){

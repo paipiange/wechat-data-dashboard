@@ -70,15 +70,19 @@ def scan_encrypted_accounts():
                     continue
                 names = [os.path.basename(x).lower() for x in dbs]
                 has_msg = any(n.startswith("message") or n.startswith("msg") for n in names)
+                latest_mtime = max((os.path.getmtime(x) for x in dbs), default=0)
                 results.append({
                     "account": acc,
                     "msg_dir": msg_dir,
                     "db_count": len(dbs),
                     "has_message": has_msg,
+                    "latest_mtime": latest_mtime,
                     "dbs": [os.path.basename(x) for x in dbs[:20]],
                 })
-    # 含消息库的账号优先，其次库多的优先
-    results.sort(key=lambda r: (not r["has_message"], -r["db_count"]))
+    # 含消息库的账号优先，再选最近正在写入的账号；不能让库更多的旧版 3.x 数据
+    # 挤到当前 4.x 账号前面，否则当前微信进程中的密钥不可能匹配旧库。
+    results.sort(key=lambda r: (not r["has_message"], -r["latest_mtime"],
+                                -r["db_count"]))
     return results
 
 

@@ -268,10 +268,12 @@ def ensure_index(data_dir, db, background=True, force=False):
     return _build_sync(data_dir, db, force)
 
 
-def search(q, limit=200, talker=None, data_dir=None):
+def search(q, limit=200, talker=None, data_dir=None, offset=0):
     """在索引里搜索。返回与 WeChatDB.search 相同结构的 dict 列表。"""
     if not q:
         return []
+    limit = max(1, int(limit))
+    offset = max(0, int(offset))
     path = index_path(data_dir) if data_dir else None
     if not path or not os.path.exists(path):
         return []
@@ -287,8 +289,8 @@ def search(q, limit=200, talker=None, data_dir=None):
             if talker:
                 sql += " AND m.talker=?"
                 params.append(talker)
-            sql += " ORDER BY m.ctime DESC LIMIT ?"
-            params.append(limit)
+            sql += " ORDER BY m.ctime DESC, m.id DESC LIMIT ? OFFSET ?"
+            params.extend((limit, offset))
             for r in c.execute(sql, params):
                 out.append({"talker": r[0] or "", "name": r[1] or "", "content": r[2] or "",
                             "time": r[3] or 0, "isSend": int(r[4] or 0)})
@@ -299,8 +301,8 @@ def search(q, limit=200, talker=None, data_dir=None):
             if talker:
                 sql += " AND talker=?"
                 params.append(talker)
-            sql += " ORDER BY ctime DESC LIMIT ?"
-            params.append(limit)
+            sql += " ORDER BY ctime DESC, id DESC LIMIT ? OFFSET ?"
+            params.extend((limit, offset))
             for r in c.execute(sql, params):
                 out.append({"talker": r[0] or "", "name": r[1] or "", "content": r[2] or "",
                             "time": r[3] or 0, "isSend": int(r[4] or 0)})

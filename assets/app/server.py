@@ -400,8 +400,11 @@ def start_decrypt_account(account, msg_dir):
                          "dir": msg_dir, "out_dir": "",
                          "started_at": __import__("time").time(), "finished": False})
 
-    def progress(idx, total, name):
-        _DECRYPT.update({"done": idx, "total": total, "current": name})
+    def progress(idx, total=None, name=None):
+        if name is None:
+            _DECRYPT.update({"current": str(idx)})
+        else:
+            _DECRYPT.update({"done": idx, "total": total, "current": name})
 
     def worker():
         try:
@@ -1674,15 +1677,26 @@ class Handler(BaseHTTPRequestHandler):
             talker = g("talker", "")
             if not q:
                 return send_json(self, {"results": []})
+            try:
+                page = max(0, int(g("page", 0)))
+                page_size = min(200, max(1, int(g("page_size", 200))))
+            except (TypeError, ValueError):
+                return send_json(self, {"error": "page/page_size 必须是整数"}, 400)
+            offset = page * page_size
             st = ftsmod.status()
             if st["status"] == "ready" and CURRENT_DIR:
-                res = ftsmod.search(q, limit=200, talker=talker or None, data_dir=CURRENT_DIR)
-                return send_json(self, {"results": res, "source": "index"})
+                res = ftsmod.search(q, limit=page_size + 1, offset=offset,
+                                    talker=talker or None, data_dir=CURRENT_DIR)
+                return send_json(self, {"results": res[:page_size], "source": "index",
+                                        "page": page, "page_size": page_size,
+                                        "has_more": len(res) > page_size})
             # 索引未就绪：只在指定会话里搜（快），不碰全库
             if talker:
                 db = get_db()
-                res = db.search(q, limit=200, talker=talker)
-                return send_json(self, {"results": res, "source": "limited"})
+                res = db.search(q, limit=offset + page_size + 1, talker=talker)[offset:]
+                return send_json(self, {"results": res[:page_size], "source": "limited",
+                                        "page": page, "page_size": page_size,
+                                        "has_more": len(res) > page_size})
             return send_json(self, {"results": [], "source": "index-building",
                                     "index_status": st})
 

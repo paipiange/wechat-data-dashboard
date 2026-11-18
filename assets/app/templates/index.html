@@ -121,7 +121,7 @@
     <div class="card">
       <div class="row" style="justify-content:space-between">
         <h2 style="margin:0">聊天记录浏览</h2>
-        <button class="ghost" onclick="loadConversations();loadMessages()">↻ 刷新（同步新增）</button>
+        <button class="ghost" onclick="loadConversations();resetMessages()">↻ 刷新（同步新增）</button>
       </div>
       <div class="row" style="margin-top:10px">
         <input type="text" id="browseFilter" placeholder="筛选会话名/ID" oninput="loadConversations()">
@@ -131,12 +131,8 @@
       <ul class="list" id="convList" style="flex:0 0 300px"></ul>
       <div style="flex:1;min-width:0">
         <div id="chatHead" class="muted" style="margin-bottom:8px"></div>
-        <div id="chatBox" class="chat" style="max-height:520px;overflow:auto;background:#fafbfc;border-radius:8px"></div>
-        <div class="row" style="margin-top:10px">
-          <button class="ghost" id="btnPrev" onclick="prevPage()">上一页</button>
-          <span id="pageInfo" class="muted"></span>
-          <button class="ghost" id="btnNext" onclick="nextPage()">下一页</button>
-        </div>
+        <div id="chatBox" class="chat" style="height:520px;overflow:auto;background:#fafbfc;border-radius:8px"></div>
+        <div id="chatMore" class="muted" role="status" aria-live="polite" style="margin-top:10px;text-align:center">向下滚动加载更早消息</div>
       </div>
     </div>
   </section>
@@ -151,6 +147,11 @@
         <button class="act" onclick="doSearch()">搜索</button>
       </div>
       <div id="searchResult" style="margin-top:12px"></div>
+      <div class="row" id="searchPager" style="margin-top:10px;display:none">
+        <button class="ghost" id="searchPrev" onclick="searchPage(-1)">上一页</button>
+        <span id="searchPageInfo" class="muted"></span>
+        <button class="ghost" id="searchNext" onclick="searchPage(1)">下一页</button>
+      </div>
     </div>
   </section>
 
@@ -208,7 +209,7 @@
 
 <script>
 const $=s=>document.querySelector(s);
-let curTalker="", curPage=0, curYear=2024;
+let curTalker="", curPage=0, curYear=2024, chatLoading=false, chatDone=false, chatSeq=0;
 // 会话名缓存：talker -> 名称。loadMessages 用它，不再每次请求会话列表接口
 let CONV_NAME={};
 
@@ -219,7 +220,7 @@ document.querySelectorAll('#nav button').forEach(b=>{
     b.classList.add('active');
     document.querySelectorAll('main section').forEach(s=>s.classList.add('hidden'));
     $('#tab-'+b.dataset.tab).classList.remove('hidden');
-    if(b.dataset.tab==='browse'){loadConversations();loadMessages();}
+    if(b.dataset.tab==='browse'){loadConversations();resetMessages();}
     if(b.dataset.tab==='search')fillTalkerOptions();
     if(b.dataset.tab==='fav')loadFav();
     if(b.dataset.tab==='annual'){initYears();loadAnnual();}
@@ -453,9 +454,9 @@ async function loadConversations(retry,silent){
   ul.innerHTML='';
   list.forEach(c=>{const li=document.createElement('li');
     li.innerHTML=`<span>${esc(c.name)}</span><span class="muted">${c.count}条</span>`;
-    li.onclick=()=>{curTalker=c.talker;curPage=0;
+    li.onclick=()=>{curTalker=c.talker;
       document.querySelectorAll('#convList li').forEach(x=>x.classList.remove('sel'));
-      li.classList.add('sel');loadMessages();};
+      li.classList.add('sel');resetMessages();};
     ul.appendChild(li);});
   if(!list.length)ul.innerHTML='<li class="muted">暂无会话（请先在「①解密」加载数据）</li>';
   const hadTalker=!!curTalker;
@@ -470,25 +471,42 @@ async function loadConversations(retry,silent){
   // 之前这里缺了这一步：切到「浏览」页签时 loadConversations 和 loadMessages
   // 是并发的，loadMessages 在 curTalker 赋值前就跑完了（直接 return），
   // 表现为会话列表有了但右侧消息区一片空白。
-  if(curTalker&&!hadTalker&&!silent)loadMessages();
+  if(curTalker&&!hadTalker&&!silent)resetMessages();
 }
-async function loadMessages(silent){
-  if(!curTalker)return;
-  // 会话名从缓存里取，不要每次都打 /api/conversations：
-  // 那个接口在缓存重建时返回 {loading:true}，取 .conversations.find()
-  // 会直接抛异常，导致翻页「点了没反应」。
-  const name=(CONV_NAME[curTalker])||curTalker;
-  const d=await api(`/api/messages?talker=${encodeURIComponent(curTalker)}&page=${curPage}`);
-  $('#chatHead').textContent=`${name} · 共 ${d.count} 条 · 第 ${curPage+1} 页`;
+async function resetMessages(silent){
+  if(!curTalker||(silent&&chatLoading))return;
+  const talker=curTalker;
+  const seq=++chatSeq;
   const box=$('#chatBox');
-  // 静默刷新：内容没变就不重绘，否则用户看消息时会被清空重画
-  const sig=(d.messages||[]).map(m=>m.time+'|'+m.content+'|'+(m.sender_name||m.sender||'')).join('§');
-  if(silent&&box.dataset.sig===sig)return;
-  box.dataset.sig=sig;
   const keepTop=box.scrollTop;
-  box.innerHTML='';
-  // 倒序展示最新在下；显示发送者昵称 + 时间
-  (d.messages||[]).forEach(m=>{
+  chatLoading=true;
+  // 会话名从缓存里取，不要每次都打 /api/conversations：
+  // 那个接口在缓存重建时可能暂时返回 loading，消息加载不依赖它。
+  const name=(CONV_NAME[talker])||talker;
+  try{
+    const d=await api(`/api/messages?talker=${encodeURIComponent(talker)}&page=0&order=desc`);
+    if(talker!==curTalker||seq!==chatSeq)return;
+    const sig=(d.messages||[]).map(m=>m.time+'|'+m.content+'|'+(m.sender_name||m.sender||'')).join('§');
+    if(silent&&box.dataset.sig===sig)return;
+    box.dataset.sig=sig;
+    box.innerHTML='';
+    appendMessages(d.messages||[]);
+    curPage=1;
+    chatDone=!d.has_more;
+    $('#chatHead').textContent=`${name} · 共 ${d.count} 条 · 最新消息在前`;
+    $('#chatMore').textContent=chatDone?'已加载全部消息':'继续向下滚动加载更早消息';
+    box.scrollTop=silent?keepTop:0;
+  }finally{
+    if(seq!==chatSeq)return;
+    chatLoading=false;
+    if(talker===curTalker&&!chatDone&&box.scrollHeight<=box.clientHeight+160){
+      setTimeout(loadMoreMessages,0);
+    }
+  }
+}
+function appendMessages(messages){
+  const box=$('#chatBox');
+  messages.forEach(m=>{
     const wrap=document.createElement('div');
     wrap.className='msgrow'+(m.isSend?' me':' them');
     const who=m.isSend?'我':(m.sender_name||m.sender||'未知');
@@ -504,18 +522,34 @@ async function loadMessages(silent){
     wrap.appendChild(head); wrap.appendChild(div);
     box.appendChild(wrap);
   });
-  // 静默刷新时保持原滚动位置；手动刷新才滚到底部
-  box.scrollTop=silent?keepTop:box.scrollHeight;
-  // 总页数：按**原始条数**算，不是过滤后的条数
-  const totalPages=Math.max(1,Math.ceil((d.count||0)/80));
-  $('#pageInfo').textContent=`共 ${totalPages} 页`;
-  // 翻页按钮的可用状态
-  const pv=document.getElementById('btnPrev'), nx=document.getElementById('btnNext');
-  if(pv)pv.disabled=(curPage<=0);
-  if(nx)nx.disabled=(curPage>=totalPages-1);
 }
-function nextPage(){if(curPage<1e9){curPage++;loadMessages();}}
-function prevPage(){if(curPage>0){curPage--;loadMessages();}}
+async function loadMoreMessages(){
+  if(!curTalker||chatLoading||chatDone)return;
+  const talker=curTalker;
+  const seq=chatSeq;
+  chatLoading=true;
+  $('#chatMore').textContent='加载中…';
+  try{
+    const d=await api(`/api/messages?talker=${encodeURIComponent(talker)}&page=${curPage}&order=desc`);
+    if(talker!==curTalker||seq!==chatSeq)return;
+    appendMessages(d.messages||[]);
+    curPage++;
+    chatDone=!d.has_more;
+    $('#chatMore').textContent=chatDone?'已加载全部消息':'继续向下滚动加载更早消息';
+  }catch(e){
+    $('#chatMore').textContent='加载失败，请稍后重试';
+  }finally{
+    if(seq!==chatSeq)return;
+    chatLoading=false;
+    const box=$('#chatBox');
+    if(talker===curTalker&&!chatDone&&box.scrollHeight<=box.clientHeight+160){
+      setTimeout(loadMoreMessages,0);
+    }
+  }
+}
+$('#chatBox').addEventListener('scroll',function(){
+  if(this.scrollTop+this.clientHeight>=this.scrollHeight-160)loadMoreMessages();
+},{passive:true});
 
 // 实时轮询：会话列表 + 当前会话的消息，每 15 秒静默刷新一次。
 // 只在「浏览」标签页生效，不打断其它页签的操作。
@@ -531,28 +565,40 @@ async function pollLive(){
   try{
     await loadConversations(false,true);
     // 只在第 1 页（最新消息）时自动刷新消息区
-    if(curTalker&&curPage===0)await loadMessages(true);
+    if(curTalker&&curPage===1)await resetMessages(true);
   }catch(e){}
   _pollBusy=false;
 }
 setInterval(pollLive,15000);
 
 // ③ 搜索
+let searchCurPage=0, searchHasMore=false;
 async function fillTalkerOptions(){
   const d=await api('/api/conversations');
   const sel=$('#searchTalker');sel.innerHTML='<option value="">全部会话</option>';
   d.conversations.forEach(c=>{const o=document.createElement('option');o.value=c.talker;o.textContent=c.name;sel.appendChild(o);});
 }
-async function doSearch(){
+async function doSearch(page=0){
   const q=$('#searchBox').value.trim();if(!q)return;
   const tk=$('#searchTalker').value;
-  const d=await api(`/api/search?q=${encodeURIComponent(q)}&talker=${encodeURIComponent(tk)}`);
+  searchCurPage=Math.max(0,page);
+  const d=await api(`/api/search?q=${encodeURIComponent(q)}&talker=${encodeURIComponent(tk)}&page=${searchCurPage}&page_size=50`);
   const box=$('#searchResult');
+  searchHasMore=!!d.has_more;
+  $('#searchPager').style.display='flex';
+  $('#searchPrev').disabled=searchCurPage===0;
+  $('#searchNext').disabled=!searchHasMore;
+  $('#searchPageInfo').textContent=`第 ${searchCurPage+1} 页 · 本页 ${d.results.length} 条`;
   if(!d.results.length){box.innerHTML='<p class="muted">没有匹配结果。</p>';return;}
-  box.innerHTML=`<p class="muted">找到 ${d.results.length} 条</p>`;
+  box.innerHTML='';
   d.results.forEach(r=>{const div=document.createElement('div');div.className='card';div.style.margin='8px 0';
     div.innerHTML=`<div class="muted">${esc(r.name)} · ${ts(r.time)} · ${r.isSend?'我':'对方'}</div><div>${esc(r.content)}</div>`;
     box.appendChild(div);});
+}
+function searchPage(step){
+  const next=searchCurPage+step;
+  if(next<0||(step>0&&!searchHasMore))return;
+  doSearch(next);
 }
 
 // ④ 朋友圈/收藏
